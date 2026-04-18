@@ -11,26 +11,53 @@ from .base_processor import FeatureProcessor
 
 @register_processor("tpc_static")
 class TPCStaticProcessor(FeatureProcessor):
-    """Static feature encoder for TPC (paper Table 6 style).
+    """
+    Feature processor for TPC static inputs
 
-    Input: a dict of raw values, e.g.:
-      {
-        "gender": "M",
-        "race": "...",
-        "admission_location": "...",
-        "insurance": "...",
-        "first_careunit": "...",
-        "hour_of_admission": 13,
-        "admission_height": 170.0,
-        "admission_weight": 80.0,
-        "gcs_eye": 4.0,
-        "gcs_motor": 6.0,
-        "gcs_verbal": 5.0,
-        "anchor_age": 65
-      }
+    Encodes the 12 static features for one ICU stay into a fixed-size 1D float tensor.
+    Categorical features are one-hot encoded over a vocabulary built during fit().
+    Numeric features are scaled to [-1, 1] using per-feature 5th/95th percentiles
+    computed during fit(), then clipped to [clip_min, clip_max].
 
-    Output: a 1D float tensor containing:
-      [one-hot categoricals..., scaled numerics...]
+    Categorical features (one-hot encoded):
+        gender, race (paper: ethnicity), admission_location, insurance, first_careunit
+
+    Numeric features (robust scaled):
+        hour_of_admission, admission_height, admission_weight,
+        gcs_eye, gcs_motor, gcs_verbal, anchor_age
+
+    Input format (dict) produced by RemainingLengthOfStayTPC_MIMIC4 task:
+        {
+            "gender":             str,    # "M" or "F"
+            "race":               str,    # categorical — paper calls this ethnicity
+            "admission_location": str,    # categorical
+            "insurance":          str,    # categorical
+            "first_careunit":     str,    # categorical
+            "hour_of_admission":  int,    # 0-23
+            "admission_height":   float,  # cm, or None if not recorded
+            "admission_weight":   float,  # kg, or None if not recorded
+            "gcs_eye":            float,  # 1-4, or None if not recorded
+            "gcs_motor":          float,  # 1-6, or None if not recorded
+            "gcs_verbal":         float,  # 1-5, or None if not recorded
+            "anchor_age":         int,    # age at ICU admission
+        }
+
+    Args:
+        clip_min: Lower clip bound after scaling. Default: -4.0.
+        clip_max: Upper clip bound after scaling. Default:  4.0.
+
+    Returns:
+        torch.FloatTensor of shape (S,) where S = sum of one-hot vocab sizes + 7 numeric features.
+        Missing categorical values map to the <UNK> one-hot position.
+        Missing numeric values map to 0.0 (the scaled midpoint).
+
+    Examples:
+        >>> processor = TPCStaticProcessor()
+        >>> samples = [{"static": {"gender": "M", "race": "WHITE", ...}}]
+        >>> processor.fit(samples, "static")
+        >>> out = processor.process({"gender": "M", "race": "WHITE", ...})
+        >>> out.shape    # (S,) where S depends on vocab sizes seen during fit
+        >>> out.dtype    # torch.float32
     """
 
     CATEGORICAL_KEYS: Tuple[str, ...] = (
@@ -61,6 +88,7 @@ class TPCStaticProcessor(FeatureProcessor):
         self._p95: Dict[str, float] = {}
 
     def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
+        """Build categorical vocabularies and compute per-feature 5th/95th percentiles from all samples."""
         cat_values: Dict[str, set[str]] = {k: set() for k in self.CATEGORICAL_KEYS}
         num_values: Dict[str, List[float]] = {k: [] for k in self.NUMERIC_KEYS}
 
@@ -102,6 +130,8 @@ class TPCStaticProcessor(FeatureProcessor):
                 self._p95[k] = float(np.nanpercentile(arr, 95))
 
     def _scale(self, key: str, x: float) -> float:
+        """Scale a numeric value to [-1, 1] using the feature's 5th/95th percentile range, then clip to [clip_min, clip_max]."""
+
         p5 = self._p5.get(key, 0.0)
         p95 = self._p95.get(key, 1.0)
         if p95 == p5:
@@ -110,6 +140,7 @@ class TPCStaticProcessor(FeatureProcessor):
         return float(np.clip(scaled, self.clip_min, self.clip_max))
 
     def process(self, value: Dict[str, Any]) -> torch.Tensor:
+        """Encode the static feature dict into a 1D tensor of one-hot categoricals followed by scaled numerics."""
         parts: List[float] = []
 
         # Categorical one-hots.
@@ -136,18 +167,22 @@ class TPCStaticProcessor(FeatureProcessor):
         return torch.tensor(parts, dtype=torch.float32)
 
     def size(self) -> int:
+        """ Return the total output dimension S = sum of categorical vocab sizes + number of numeric features."""
         cat_size = sum(len(self._cat_vocab.get(k, ["<UNK>"])) for k in self.CATEGORICAL_KEYS)
         return cat_size + len(self.NUMERIC_KEYS)
-
     def is_token(self) -> bool:
+        """Static features are continuous, not discrete tokens."""
         return False
 
     def schema(self) -> tuple[str, ...]:
+        """Output is a tuple of (value) tensor."""
         return ("value",)
 
     def dim(self) -> tuple[int, ...]:
+        """Output is a 1D tensor."""
         return (1,)
 
     def spatial(self) -> tuple[bool, ...]:
+        """Static features are not spatial."""
         return (False,)
 

@@ -97,17 +97,6 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         # Choose the first match (should be unique).
         return admissions[0]
 
-    def _get_patient_anchor_age(self, patient: Any) -> Optional[int]:
-        """Return the patient's anchor_age as an int, or None if unavailable."""
-        demographics = patient.get_events(event_type="patients")
-        if not demographics:
-            return None
-        demo = demographics[0]
-        try:
-            return int(demo.anchor_age)
-        except Exception:
-            return None
-
     def _build_window(self, icu_start: datetime, icu_end: datetime) -> Optional[_TPCWindow]:
         """Compute the prediction window for a single ICU stay."""
         if icu_end <= icu_start:
@@ -157,12 +146,21 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         if demographics:
             demo = demographics[0]
             static["gender"] = getattr(demo, "gender", None)
-            static["anchor_age"] = getattr(demo, "anchor_age", None)
+            # static["anchor_age"] = getattr(demo, "anchor_age", None)
+            # Compute age at ICU admission
+            # Age was calculated from the ‘intime’ field in the icustays table and ‘anchor year’ in the patients table
+            try:
+                anchor_age = int(demo.anchor_age)
+                anchor_year = int(demo.anchor_year)
+                static["anchor_age"] = anchor_age + (icu_start.year - anchor_year)
+            except Exception:
+                static["anchor_age"] = None
+
 
         if admission is not None:
             static["race"] = getattr(admission, "race", None)
             static["admission_location"] = getattr(admission, "admission_location", None)
-            static["insurance"] = getattr(admission, "insurance", None)
+            static["insurance"] = getattr(admission, "insura_get_patient_anchor_agence", None)
 
         static["first_careunit"] = getattr(stay, "first_careunit", None)
         static["hour_of_admission"] = int(icu_start.hour)
@@ -274,9 +272,16 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
 
     def __call__(self, patient: Any) -> List[Dict[str, Any]]:
         # cohort filter: adult
-        age = self._get_patient_anchor_age(patient)
-        if age is None or age < 18:
+        # fetch anchor_age and anchor_year once at patient level for per-stay age computation
+        demographics = patient.get_events(event_type="patients")
+        if not demographics:
             return []
+        try:
+            anchor_age = int(demographics[0].anchor_age)
+            anchor_year = int(demographics[0].anchor_year)
+        except Exception:
+            return []
+
 
         stays = patient.get_events(event_type="icustays")
         if not stays:
@@ -289,6 +294,10 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
                 icu_end: datetime = datetime.strptime(stay.outtime, "%Y-%m-%d %H:%M:%S")
             except Exception:
                 continue
+            # cohort filter: age at this specific ICU admission
+            if anchor_age + (icu_start.year - anchor_year) < 18:
+                continue
+
 
             window = self._build_window(icu_start, icu_end)
             if window is None:

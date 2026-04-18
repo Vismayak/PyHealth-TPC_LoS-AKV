@@ -12,22 +12,64 @@ from .base_processor import FeatureProcessor
 
 @register_processor("tpc_timeseries")
 class TPCTimeseriesProcessor(FeatureProcessor):
-    """TPC-specific time-series processor.
+    """
+    Feature processor for TPC time-series inputs (paper: Rocheteau et al., CHIL 2021).
 
-    Input value format (dict) is produced by `RemainingLengthOfStayTPC_MIMIC4`:
-      {
-        "prefill_start": datetime,
-        "icu_start": datetime,
-        "pred_start": datetime,
-        "pred_end": datetime,
-        "feature_itemids": list[str],
-        "long_df": {"timestamp": [...], "itemid": [...], "value": [...], "source": [...]}
-      }
+    Consumes the raw payload produced by RemainingLengthOfStayTPC_MIMIC4 task and outputs
+    a (T, F, 2) tensor of hourly-resampled, forward-filled values with decay indicators.
+    Scaling uses per-feature 5th/95th percentiles computed during fit().
 
-    Output:
-      torch.FloatTensor of shape (T, F, 2) where:
-        - [:, :, 0] = forward-filled (hourly) values
-        - [:, :, 1] = decay indicators (0.75 ** hours_since_last_observed)
+    Input format (dict) produced by RemainingLengthOfStayTPC_MIMIC4:
+        {
+            "prefill_start": datetime,   # start of forward-fill seeding window (icu_start - 24h)
+            "icu_start":     datetime,   # ICU admission time
+            "pred_start":    datetime,   # first prediction hour (icu_start + 5h)
+            "pred_end":      datetime,   # last prediction hour (min(icu_end, icu_start + 336h))
+            "feature_itemids": list[str],  # ordered list of itemids defining column layout
+            "long_df": {
+                "timestamp": list[datetime],
+                "itemid":    list[str],
+                "value":     list[float],
+                "source":    list[str],   # "chartevents" or "labevents"
+            }
+        }
+
+    Args:
+        sampling_rate: Resampling interval. Must be 1 hour (paper setting). Default: timedelta(hours=1).
+        decay_base:    Base for decay indicator: decay = decay_base ** hours_since_last_obs. Default: 0.75.
+        clip_min:      Lower clip bound after scaling. Default: -4.0.
+        clip_max:      Upper clip bound after scaling. Default:  4.0.
+
+    Returns:
+        torch.FloatTensor of shape (T, F, 2) where T = prediction hours, F = number of features:
+            [:, :, 0] = forward-filled scaled values. Initialised to 0.0 before first observation.
+            [:, :, 1] = decay indicators:
+                        1.0  = fresh observation at this timestep
+                        0.75^j = j hours since last observation
+                        0.0  = feature never observed up to this point
+
+    Examples:
+        >>> from datetime import datetime, timedelta
+        >>> processor = TPCTimeseriesProcessor()
+        >>> prefill = datetime(2020, 1, 1, 0)
+        >>> payload = {
+        ...     "prefill_start": prefill,
+        ...     "icu_start":     prefill,
+        ...     "pred_start":    prefill + timedelta(hours=5),
+        ...     "pred_end":      prefill + timedelta(hours=10),
+        ...     "feature_itemids": ["A", "B"],
+        ...     "long_df": {
+        ...         "timestamp": [prefill],
+        ...         "itemid":    ["A"],
+        ...         "value":     [80.0],
+        ...         "source":    ["chartevents"],
+        ...     }
+        ... }
+        >>> processor.fit([{"ts": payload}], "ts")
+        >>> out = processor.process(payload)
+        >>> out.shape          # (5, 2, 2) — T=5, F=2, channels=2
+        >>> out[0, 0, 1]       # 0.75**5 — feature A last seen at hour 0, pred starts at hour 5
+        >>> out[0, 1, 1]       # 0.0 — feature B never observed
     """
 
     def __init__(
@@ -48,6 +90,7 @@ class TPCTimeseriesProcessor(FeatureProcessor):
         self._feature_itemids: List[str] = []
 
     def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
+        """Compute per-feature 5th/95th percentiles from all samples for robust scaling."""
         values_by_item: Dict[str, List[float]] = {}
         feature_itemids: List[str] | None = None
 
@@ -83,6 +126,7 @@ class TPCTimeseriesProcessor(FeatureProcessor):
             self._p95[itemid] = float(np.nanpercentile(arr, 95))
 
     def _scale(self, itemid: str, x: float) -> float:
+        """Scale a single value using the per-feature 5th/95th percentiles."""
         p5 = self._p5.get(itemid, 0.0)
         p95 = self._p95.get(itemid, 1.0)
         if p95 == p5:
@@ -91,6 +135,7 @@ class TPCTimeseriesProcessor(FeatureProcessor):
         return float(np.clip(scaled, self.clip_min, self.clip_max))
 
     def process(self, value: Dict[str, Any]) -> torch.Tensor:
+        """Resample observations to hourly grid, forward-fill, compute decay indicators, and return (T, F, 2) tensor."""
         prefill_start: datetime = value["prefill_start"]
         pred_start: datetime = value["pred_start"]
         pred_end: datetime = value["pred_end"]
@@ -169,18 +214,23 @@ class TPCTimeseriesProcessor(FeatureProcessor):
         return torch.tensor(out, dtype=torch.float32)
 
     def size(self) -> int:
+        """Return the number of time-series features, equal to len(feature_itemids)."""
+
         return len(self._feature_itemids)
 
     def is_token(self) -> bool:
+        """Time-series values are continuous, not discrete tokens."""
         return False
 
     def schema(self) -> tuple[str, ...]:
+        """Output is a tuple of (value, decay) tensors."""
         return ("value",)
 
     def dim(self) -> tuple[int, ...]:
+        """Output is a 3D tensor (time, feature, channel)."""
         return (3,)
 
     def spatial(self) -> tuple[bool, ...]:
-        # (time, feature, channel)
+        """Time dimension is spatial, feature and channel dimensions are not."""
         return (True, False, False)
 

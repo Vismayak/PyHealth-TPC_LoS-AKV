@@ -140,3 +140,6 @@ data/physionet.org/
 
 # Model weight files (large binaries, distributed separately)
 weightfiles/
+
+
+.pyhealth_dataset_cache/

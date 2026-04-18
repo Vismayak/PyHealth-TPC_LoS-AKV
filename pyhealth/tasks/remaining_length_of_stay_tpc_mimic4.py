@@ -8,7 +8,7 @@ import polars as pl
 
 from .base_task import BaseTask
 
-
+# Immutable container for the four time boundaries of a single ICU stay's prediction window.
 @dataclass(frozen=True)
 class _TPCWindow:
     prefill_start: datetime
@@ -90,6 +90,7 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         }
 
     def _get_admission_for_stay(self, patient: Any, hadm_id: str) -> Optional[Any]:
+        """Return the admissions event matching the given hadm_id, or None if not found."""
         admissions = patient.get_events(event_type="admissions", filters=[("hadm_id", "==", hadm_id)])
         if not admissions:
             return None
@@ -97,6 +98,7 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         return admissions[0]
 
     def _get_patient_anchor_age(self, patient: Any) -> Optional[int]:
+        """Return the patient's anchor_age as an int, or None if unavailable."""
         demographics = patient.get_events(event_type="patients")
         if not demographics:
             return None
@@ -107,11 +109,12 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
             return None
 
     def _build_window(self, icu_start: datetime, icu_end: datetime) -> Optional[_TPCWindow]:
+        """Compute the prediction window for a single ICU stay."""
         if icu_end <= icu_start:
-            return None
+            return None # malformed data 
         duration_hours = (icu_end - icu_start).total_seconds() / 3600.0
         if duration_hours < self.min_icu_hours:
-            return None
+            return None # stays shorter than min_icu_hours are excldued 
 
         prefill_start = icu_start - timedelta(hours=self.pre_icu_hours)
         pred_start = icu_start + timedelta(hours=self.start_hour)
@@ -137,6 +140,17 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         prefill_start: datetime,
     ) -> Dict[str, Any]:
         static: Dict[str, Any] = {}
+
+        """Extract the 12 static features specified in the paper for an ICU stay.
+
+        Returns a raw dict of unencoded values for TPCStaticProcessor to encode.
+        Fields sourced from each table:
+            patients:    gender, anchor_age
+            admissions:  race, admission_location, insurance
+            icustays:    first_careunit, hour_of_admission
+            chartevents: admission_height, admission_weight, gcs_eye, gcs_motor, gcs_verbal
+                        (first recorded value in [prefill_start, icu_start + 1h])
+        """
 
         # Table 6 (paper) core fields.
         demographics = patient.get_events(event_type="patients")
@@ -173,6 +187,7 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
                 ce_df = ce_df.sort("timestamp")
 
                 def first_item_value(itemids: Sequence[str]) -> Optional[float]:
+                    """Return the first non-null valuenum in ce_df matching any of the given itemids, or None if not found."""
                     sub = ce_df.filter(pl.col("chartevents/itemid").is_in([str(x) for x in itemids]))
                     if sub.height == 0:
                         return None

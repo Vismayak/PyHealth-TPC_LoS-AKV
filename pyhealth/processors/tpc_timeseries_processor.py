@@ -13,7 +13,7 @@ from .base_processor import FeatureProcessor
 @register_processor("tpc_timeseries")
 class TPCTimeseriesProcessor(FeatureProcessor):
     """
-    Feature processor for TPC time-series inputs (paper: Rocheteau et al., CHIL 2021).
+    Feature processor for TPC time-series inputs.
 
     Consumes the raw payload produced by RemainingLengthOfStayTPC_MIMIC4 task and outputs
     a (T, F, 2) tensor of hourly-resampled, forward-filled values with decay indicators.

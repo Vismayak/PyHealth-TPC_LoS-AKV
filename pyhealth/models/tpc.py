@@ -23,7 +23,7 @@ class TPCBlock(nn.Module):
         in_features:        Number of input features R.
         in_channels:        Channels per feature C. 2 on layer 0 (value, decay),
                             temporal_channels +1 thereafter.
-        temporal_channels:  Temporal conv output channels Y per feature
+        temporal_channels:  Temporal conv output channels Y per feature.
         pointwise_channels: Pointwise conv output channels Z.
         kernel_size:        Temporal conv kernel size k.
         dilation:           Dilation factor d. Set to layer_idx + 1 per layer.
@@ -31,13 +31,6 @@ class TPCBlock(nn.Module):
         temporal_dropout:   Dropout after temporal branch.
         use_batchnorm:      Batch normalisation after each branch. Default: True.
         static_dim:         Static feature dimension S injected into pointwise branch.
-
-    Input:
-        x:      (B, T, R, C_in)
-        static: (B, S) or None
-
-    Output:
-        (B, T, R + Z, Y + 1)
 
     Examples:
         >>> block = TPCBlock(
@@ -98,12 +91,14 @@ class TPCBlock(nn.Module):
         self.relu = nn.ReLU()
 
     def forward(self, x: torch.Tensor, static: Optional[torch.Tensor] = None) -> torch.Tensor:
-        """
+        """Forward pass of one TPC block.
+
         Args:
-            x: (B, T, R, C_in)
-            static: (B, S) or None
+            x: (B, T, R, C_in) time-series input tensor.
+            static: (B, S) static feature tensor, or None.
+
         Returns:
-            (B, T, R + Z, Y + 1)
+            torch.Tensor: output tensor of shape (B, T, R + Z, Y + 1).
         """
         B, T, R, C = x.shape
         if R != self.in_features or C != self.in_channels:
@@ -181,6 +176,7 @@ class TPC(BaseModel):
         decay_clip_max_days: Maximum predicted LoS in days (HardTanh upper bound). Default: 100.0.
 
     Examples:
+        >>> from datetime import datetime
         >>> from pyhealth.datasets import create_sample_dataset, get_dataloader
         >>> import torch
         >>> samples = [
@@ -247,8 +243,7 @@ class TPC(BaseModel):
         # Hardcoded because "regression_sequence" is not a recognised PyHealth mode string.
         # BaseModel._resolve_mode() would fail to map it to "regression" automatically,
         # so we set it explicitly to enable the Trainer's regression metric pipeline.
-        self.mode = "regression" 
-
+        self.mode = "regression"
 
         self.temporal_channels = int(temporal_channels)
         self.pointwise_channels = int(pointwise_channels)
@@ -299,7 +294,30 @@ class TPC(BaseModel):
         self.hardtanh = nn.Hardtanh(min_val=self.min_days, max_val=self.max_days)
 
     def forward(self, **kwargs) -> Dict[str, torch.Tensor]:
-        """Forward propagation."""
+        """Forward propagation.
+
+        Args:
+            **kwargs: keyword arguments for the model. Must contain all feature
+                keys and the label key. Specifically:
+                - ts: (B, T, F, 2) padded time-series tensor produced by
+                  TPCTimeseriesProcessor (value + decay channels).
+                - static: (B, S) static feature tensor produced by
+                  TPCStaticProcessor.
+                - <label_key> (optional): (B, T) padded target tensor; when
+                  present, loss and y_true are added to the output.
+
+        Returns:
+            Dict[str, torch.Tensor]: A dictionary with the following keys:
+
+                - logit: a (B, T) tensor of raw log-space predictions.
+                - y_prob: predicted remaining LoS in days. When labels are
+                  provided this is a masked 1-D tensor of real timesteps only;
+                  otherwise (B, T).
+                - loss (when labels provided): scalar MSLE loss over
+                  unpadded timesteps.
+                - y_true (when labels provided): masked 1-D tensor of
+                  ground-truth LoS values aligned with y_prob.
+        """
         ts: torch.Tensor = kwargs["ts"].to(self.device)          # (B,T,F,2) padded
         static: torch.Tensor = kwargs["static"].to(self.device)  # (B,S)
         y_true: Optional[torch.Tensor] = None
@@ -349,8 +367,16 @@ class TPC(BaseModel):
         return results
 
     def forward_from_embedding(self, **kwargs) -> Dict[str, torch.Tensor]:
-        """Forward propagation from embedding space."""
-        # This model already consumes dense tensors 
-        # since no token embedding is used.
+        """Forward pass starting from feature embeddings.
+
+        TPC takes dense numeric tensors directly (no token-embedding step), so
+        this method just calls the forward method.
+
+        Args:
+            **kwargs: same keyword arguments as forward().
+
+        Returns:
+            Dict[str, torch.Tensor]: same output dictionary as forward().
+        """
         return self.forward(**kwargs)
 

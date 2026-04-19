@@ -35,6 +35,27 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
     Required dataset tables:
     - patients, admissions, icustays
     - chartevents and/or labevents (depending on provided itemids)
+
+    Attributes:
+        input_schema (Dict[str, Any]): Set at instantiation time (not class level) because
+            the processor configuration depends on ``chartevent_itemids`` and
+            ``labevent_itemids`` supplied by the user at runtime.
+
+            .. code-block:: python
+
+                {
+                    "ts":     ("tpc_timeseries", {}),  # -> TPCTimeseriesProcessor; produces (T, F, 2) tensor
+                    "static": ("tpc_static",     {}),  # -> TPCStaticProcessor; produces (S,) tensor
+                }
+
+        output_schema (Dict[str, Any]): Set at instantiation time alongside
+            ``input_schema``.
+
+            .. code-block:: python
+
+                {
+                    "y": ("regression_sequence", {}),  # -> RegressionSequenceProcessor; produces (T,) tensor
+                }
     """
 
     task_name: str = "RemainingLengthOfStayTPC_MIMIC4"

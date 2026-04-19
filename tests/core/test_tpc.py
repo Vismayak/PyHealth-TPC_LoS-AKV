@@ -131,10 +131,6 @@ class TestTPC(unittest.TestCase):
             self.dataset, batch_size=self.batch_size, shuffle=False
         )
 
-    # ------------------------------------------------------------------
-    # Initialisation
-    # ------------------------------------------------------------------
-
     def test_model_initialisation(self):
         """Model initialises correctly and infers F and S from processors."""
         self.assertIsInstance(self.model, TPC)
@@ -160,9 +156,6 @@ class TestTPC(unittest.TestCase):
             self.assertEqual(block.in_features, expected_in_features)
             expected_in_features += self.model.pointwise_channels
 
-    # ------------------------------------------------------------------
-    # Forward pass — output keys and shapes
-    # ------------------------------------------------------------------
 
     def test_forward_output_keys(self):
         """Forward pass returns required output keys."""
@@ -261,10 +254,6 @@ class TestTPC(unittest.TestCase):
 
         self.assertLess(loss_after, loss_before)
 
-    # ------------------------------------------------------------------
-    # Custom hyperparameters
-    # ------------------------------------------------------------------
-
     def test_custom_hyperparameters(self):
         """Model initialises and runs forward with non-default hyperparameters."""
         model = TPC(
@@ -286,10 +275,6 @@ class TestTPC(unittest.TestCase):
         self.assertIn("loss", ret)
         self.assertIn("y_prob", ret)
         self.assertTrue(torch.isfinite(ret["loss"]))
-
-    # ------------------------------------------------------------------
-    # TPCBlock
-    # ------------------------------------------------------------------
 
     def test_tpc_block_output_shape(self):
         """TPCBlock output has correct shape (B, T, R+Z, Y+1)."""
@@ -339,10 +324,6 @@ class TestTPC(unittest.TestCase):
         x_wrong = torch.randn(2, 10, 3, 2)  # R=3 but block expects R=4
         with self.assertRaises(ValueError):
             block(x_wrong)
-
-    # ------------------------------------------------------------------
-    # MSLE loss
-    # ------------------------------------------------------------------
 
     def test_msle_loss_is_non_negative(self):
         """MSLE loss is always >= 0."""

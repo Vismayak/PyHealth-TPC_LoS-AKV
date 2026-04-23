@@ -47,7 +47,8 @@ class TPCStaticProcessor(FeatureProcessor):
         clip_max: Upper clip bound after scaling. Default:  4.0.
 
     Returns:
-        torch.FloatTensor of shape (S,) where S = sum of one-hot vocab sizes + 7 numeric features.
+        ``torch.FloatTensor`` of shape ``(S,)`` where ``S`` is the sum of one-hot
+        vocabulary sizes plus seven numeric features.
         Missing categorical values map to the <UNK> one-hot position.
         Missing numeric values map to 0.0 (the scaled midpoint).
 
@@ -77,18 +78,25 @@ class TPCStaticProcessor(FeatureProcessor):
         "anchor_age",
     )
 
-    def __init__(self, clip_min: float = -4.0, clip_max: float = 4.0):
+    def __init__(self, clip_min: float = -4.0, clip_max: float = 4.0) -> None:
         self.clip_min = float(clip_min)
         self.clip_max = float(clip_max)
 
         self._cat_vocab: Dict[str, List[str]] = {k: [] for k in self.CATEGORICAL_KEYS}
-        self._cat_index: Dict[str, Dict[str, int]] = {k: {} for k in self.CATEGORICAL_KEYS}
+        self._cat_index: Dict[str, Dict[str, int]] = {
+            k: {} for k in self.CATEGORICAL_KEYS
+        }
 
         self._p5: Dict[str, float] = {}
         self._p95: Dict[str, float] = {}
 
     def fit(self, samples: Iterable[Dict[str, Any]], field: str) -> None:
-        """Build categorical vocabularies and compute per-feature 5th/95th percentiles from all samples."""
+        """Build vocabularies and numeric scaling bounds from ``samples``.
+
+        Collects categorical tokens and numeric values for each static field, then
+        stores sorted vocabularies (with ``<UNK>``) and 5th/95th percentiles per
+        numeric feature.
+        """
         cat_values: Dict[str, set[str]] = {k: set() for k in self.CATEGORICAL_KEYS}
         num_values: Dict[str, List[float]] = {k: [] for k in self.NUMERIC_KEYS}
 
@@ -130,7 +138,11 @@ class TPCStaticProcessor(FeatureProcessor):
                 self._p95[k] = float(np.nanpercentile(arr, 95))
 
     def _scale(self, key: str, x: float) -> float:
-        """Scale a numeric value to [-1, 1] using the feature's 5th/95th percentile range, then clip to [clip_min, clip_max]."""
+        """Linearly scale ``x`` into ``[-1, 1]`` using stored percentiles.
+
+        Values are clipped to ``[clip_min, clip_max]`` after scaling. If the
+        percentile range is degenerate, returns ``0.0``.
+        """
 
         p5 = self._p5.get(key, 0.0)
         p95 = self._p95.get(key, 1.0)
@@ -140,7 +152,10 @@ class TPCStaticProcessor(FeatureProcessor):
         return float(np.clip(scaled, self.clip_min, self.clip_max))
 
     def process(self, value: Dict[str, Any]) -> torch.Tensor:
-        """Encode the static feature dict into a 1D tensor of one-hot categoricals followed by scaled numerics."""
+        """Encode ``value`` into a 1D float tensor.
+
+        Categorical columns are one-hot encoded; numeric columns are robust-scaled.
+        """
         parts: List[float] = []
 
         # Categorical one-hots.
@@ -167,9 +182,12 @@ class TPCStaticProcessor(FeatureProcessor):
         return torch.tensor(parts, dtype=torch.float32)
 
     def size(self) -> int:
-        """ Return the total output dimension S = sum of categorical vocab sizes + number of numeric features."""
-        cat_size = sum(len(self._cat_vocab.get(k, ["<UNK>"])) for k in self.CATEGORICAL_KEYS)
+        """Return total static dimension (one-hot widths plus numeric count)."""
+        cat_size = sum(
+            len(self._cat_vocab.get(k, ["<UNK>"])) for k in self.CATEGORICAL_KEYS
+        )
         return cat_size + len(self.NUMERIC_KEYS)
+
     def is_token(self) -> bool:
         """Static features are continuous, not discrete tokens."""
         return False

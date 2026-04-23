@@ -8,9 +8,11 @@ import polars as pl
 
 from .base_task import BaseTask
 
-# Immutable container for the four time boundaries of a single ICU stay's prediction window.
+
 @dataclass(frozen=True)
 class _TPCWindow:
+    """ICU stay time boundaries used for prefill, resampling, and labels."""
+
     prefill_start: datetime
     icu_start: datetime
     pred_start: datetime
@@ -32,31 +34,30 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
 
     Notes:
     - We intentionally do **not** include diagnoses for MIMIC-IV (paper §4.2).
-    - Time series are taken from `chartevents` and `labevents` with configurable itemids.
+    - Time series use ``chartevents`` / ``labevents`` with user-configured itemids.
 
     Required dataset tables:
     - patients, admissions, icustays
     - chartevents and/or labevents (depending on provided itemids)
 
     Attributes:
-        input_schema (Dict[str, Any]): Set at instantiation time (not class level) because
-            the processor configuration depends on ``chartevent_itemids`` and
-            ``labevent_itemids`` supplied by the user at runtime.
+        input_schema (Dict[str, Any]): Built per instance from the itemid lists passed
+            to the constructor. Maps feature keys to ``(processor_name, kwargs)`` pairs.
 
             .. code-block:: python
 
                 {
-                    "ts":     ("tpc_timeseries", {}),  # -> TPCTimeseriesProcessor; produces (T, F, 2) tensor
-                    "static": ("tpc_static",     {}),  # -> TPCStaticProcessor; produces (S,) tensor
+                    "ts": ("tpc_timeseries", {}),
+                    "static": ("tpc_static", {}),
                 }
 
-        output_schema (Dict[str, Any]): Set at instantiation time alongside
-            ``input_schema``.
+        output_schema (Dict[str, Any]): Declared next to ``input_schema`` with the same
+            pattern for labels.
 
             .. code-block:: python
 
                 {
-                    "y": ("regression_sequence", {}),  # -> RegressionSequenceProcessor; produces (T,) tensor
+                    "y": ("regression_sequence", {}),
                 }
     """
 
@@ -84,7 +85,7 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         static_gcs_eye_itemids: Optional[Sequence[str]] = None,
         static_gcs_verbal_itemids: Optional[Sequence[str]] = None,
         static_gcs_motor_itemids: Optional[Sequence[str]] = None,
-    ):
+    ) -> None:
         self.start_hour = int(start_hour)
         self.max_hours = int(max_hours)
         self.pre_icu_hours = int(pre_icu_hours)
@@ -94,11 +95,22 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         self.labevent_itemids = [str(x) for x in (labevent_itemids or [])]
         self.feature_itemids = self.chartevent_itemids + self.labevent_itemids
 
-        self.static_height_itemids = [str(x) for x in (static_height_itemids or self.DEFAULT_HEIGHT_ITEMIDS)]
-        self.static_weight_itemids = [str(x) for x in (static_weight_itemids or self.DEFAULT_WEIGHT_ITEMIDS)]
-        self.static_gcs_eye_itemids = [str(x) for x in (static_gcs_eye_itemids or self.DEFAULT_GCS_EYE_ITEMIDS)]
-        self.static_gcs_verbal_itemids = [str(x) for x in (static_gcs_verbal_itemids or self.DEFAULT_GCS_VERBAL_ITEMIDS)]
-        self.static_gcs_motor_itemids = [str(x) for x in (static_gcs_motor_itemids or self.DEFAULT_GCS_MOTOR_ITEMIDS)]
+        self.static_height_itemids = [
+            str(x) for x in (static_height_itemids or self.DEFAULT_HEIGHT_ITEMIDS)
+        ]
+        self.static_weight_itemids = [
+            str(x) for x in (static_weight_itemids or self.DEFAULT_WEIGHT_ITEMIDS)
+        ]
+        self.static_gcs_eye_itemids = [
+            str(x) for x in (static_gcs_eye_itemids or self.DEFAULT_GCS_EYE_ITEMIDS)
+        ]
+        self.static_gcs_verbal_itemids = [
+            str(x)
+            for x in (static_gcs_verbal_itemids or self.DEFAULT_GCS_VERBAL_ITEMIDS)
+        ]
+        self.static_gcs_motor_itemids = [
+            str(x) for x in (static_gcs_motor_itemids or self.DEFAULT_GCS_MOTOR_ITEMIDS)
+        ]
 
         # Input/Output schemas use explicit processor registrations.
         # - ts: custom TPC time-series processor will produce (T, F, 2)
@@ -113,20 +125,25 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         }
 
     def _get_admission_for_stay(self, patient: Any, hadm_id: str) -> Optional[Any]:
-        """Return the admissions event matching the given hadm_id, or None if not found."""
-        admissions = patient.get_events(event_type="admissions", filters=[("hadm_id", "==", hadm_id)])
+        """Return the admissions row for ``hadm_id``, or ``None`` if missing."""
+        admissions = patient.get_events(
+            event_type="admissions",
+            filters=[("hadm_id", "==", hadm_id)],
+        )
         if not admissions:
             return None
         # Choose the first match (should be unique).
         return admissions[0]
 
-    def _build_window(self, icu_start: datetime, icu_end: datetime) -> Optional[_TPCWindow]:
+    def _build_window(
+        self, icu_start: datetime, icu_end: datetime
+    ) -> Optional[_TPCWindow]:
         """Compute the prediction window for a single ICU stay."""
         if icu_end <= icu_start:
-            return None # malformed data 
+            return None  # malformed data
         duration_hours = (icu_end - icu_start).total_seconds() / 3600.0
         if duration_hours < self.min_icu_hours:
-            return None # stays shorter than min_icu_hours are excldued 
+            return None  # shorter than minimum ICU length
 
         prefill_start = icu_start - timedelta(hours=self.pre_icu_hours)
         pred_start = icu_start + timedelta(hours=self.start_hour)
@@ -151,18 +168,25 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         icu_start: datetime,
         prefill_start: datetime,
     ) -> Dict[str, Any]:
-        static: Dict[str, Any] = {}
+        """Extract the 12 static features from MIMIC-IV tables for one ICU stay.
 
-        """Extract the 12 static features specified in the paper for an ICU stay.
+        Produces a raw dict for ``TPCStaticProcessor``.
 
-        Returns a raw dict of unencoded values for TPCStaticProcessor to encode.
-        Fields sourced from each table:
-            patients:    gender, anchor_age
-            admissions:  race, admission_location, insurance
-            icustays:    first_careunit, hour_of_admission
-            chartevents: admission_height, admission_weight, gcs_eye, gcs_motor, gcs_verbal
-                        (first recorded value in [prefill_start, icu_start + 1h])
+        Args:
+            patient: Patient record with PyHealth event accessors.
+            stay: ``icustays`` row for this ICU episode.
+            admission: Matching ``admissions`` row, or ``None``.
+            icu_start: ICU ``intime`` (used for age and chart window).
+            prefill_start: Start of the pre-ICU lookback for early vitals.
+
+        Returns:
+            Mapping of static field names to raw values before encoding.
+
+        Note:
+            Height, weight, and GCS proxies use the first chart value in
+            ``[prefill_start, icu_start + 1 hour]``.
         """
+        static: Dict[str, Any] = {}
 
         # Table 6 (paper) core fields.
         demographics = patient.get_events(event_type="patients")
@@ -171,7 +195,7 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
             static["gender"] = getattr(demo, "gender", None)
             # static["anchor_age"] = getattr(demo, "anchor_age", None)
             # Compute age at ICU admission
-            # Age was calculated from the ‘intime’ field in the icustays table and ‘anchor year’ in the patients table
+            # Age from ICU intime calendar year vs patient anchor_year.
             try:
                 anchor_age = int(demo.anchor_age)
                 anchor_year = int(demo.anchor_year)
@@ -182,14 +206,16 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
 
         if admission is not None:
             static["race"] = getattr(admission, "race", None)
-            static["admission_location"] = getattr(admission, "admission_location", None)
+            static["admission_location"] = getattr(
+                admission, "admission_location", None
+            )
             static["insurance"] = getattr(admission, "insurance", None)
 
         static["first_careunit"] = getattr(stay, "first_careunit", None)
         static["hour_of_admission"] = int(icu_start.hour)
 
-        # Approximate "admission" height/weight and GCS from early chartevents.
-        # We use the first recorded value within [prefill_start, icu_start + 1h] as a stable proxy.
+        # Approximate admission height/weight/GCS from early chartevents: first value in
+        # [prefill_start, icu_start + 1h].
         early_end = icu_start + timedelta(hours=1)
         ce_df = patient.get_events(
             event_type="chartevents",
@@ -208,8 +234,10 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
                 ce_df = ce_df.sort("timestamp")
 
                 def first_item_value(itemids: Sequence[str]) -> Optional[float]:
-                    """Return the first non-null valuenum in ce_df matching any of the given itemids, or None if not found."""
-                    sub = ce_df.filter(pl.col("chartevents/itemid").is_in([str(x) for x in itemids]))
+                    """First matching ``valuenum`` in ``ce_df``, else ``None``."""
+                    sub = ce_df.filter(
+                        pl.col("chartevents/itemid").is_in([str(x) for x in itemids])
+                    )
                     if sub.height == 0:
                         return None
                     # first non-null value
@@ -218,8 +246,12 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
                         return None
                     return float(sub["chartevents/valuenum"][0])
 
-                static["admission_height"] = first_item_value(self.static_height_itemids)
-                static["admission_weight"] = first_item_value(self.static_weight_itemids)
+                static["admission_height"] = first_item_value(
+                    self.static_height_itemids
+                )
+                static["admission_weight"] = first_item_value(
+                    self.static_weight_itemids
+                )
                 static["gcs_eye"] = first_item_value(self.static_gcs_eye_itemids)
                 static["gcs_verbal"] = first_item_value(self.static_gcs_verbal_itemids)
                 static["gcs_motor"] = first_item_value(self.static_gcs_motor_itemids)
@@ -290,12 +322,23 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
         df = pl.concat(frames, how="vertical").sort("timestamp")
         timestamps = df["timestamp"].to_list()
         # Convert to a pure-Python payload for robust pickling in task caching.
-        payload = df.select("timestamp", "itemid", "value", "source").to_dict(as_series=False)
+        payload = df.select(
+            "timestamp", "itemid", "value", "source"
+        ).to_dict(as_series=False)
         return timestamps, payload
 
     def __call__(self, patient: Any) -> List[Dict[str, Any]]:
-        # cohort filter: adult
-        # fetch anchor_age and anchor_year once at patient level for per-stay age computation
+        """Build TPC training samples for every qualifying ICU stay on ``patient``.
+
+        Args:
+            patient: PyHealth patient with MIMIC-IV tables attached.
+
+        Returns:
+            List of sample dicts with ``patient_id``, ``stay_id``, ``hadm_id``,
+            ``static``, ``ts``, and ``y``. Empty when no stay passes cohort and
+            data-availability checks.
+        """
+        # Adult cohort: anchor age/year fetched once per patient.
         demographics = patient.get_events(event_type="patients")
         if not demographics:
             return []
@@ -355,7 +398,9 @@ class RemainingLengthOfStayTPC_MIMIC4(BaseTask):
             )
 
             # Labels: remaining ICU LoS (days) per hour in [pred_start, pred_end).
-            total_hours = int((window.pred_end - window.pred_start).total_seconds() // 3600)
+            total_hours = int(
+                (window.pred_end - window.pred_start).total_seconds() // 3600
+            )
             if total_hours <= 0:
                 continue
             y = []
